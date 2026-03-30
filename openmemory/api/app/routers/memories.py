@@ -22,7 +22,7 @@ from fastapi_pagination import Page, Params
 from fastapi_pagination.ext.sqlalchemy import paginate as sqlalchemy_paginate
 from pydantic import BaseModel
 from sqlalchemy import func
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, subqueryload
 
 router = APIRouter(prefix="/api/v1/memories", tags=["memories"])
 
@@ -145,12 +145,11 @@ async def list_memories(
 
     # Add joins for app and categories after filtering
     query = query.outerjoin(App, Memory.app_id == App.id)
-    query = query.outerjoin(Memory.categories)
 
     # Apply category filter if provided
     if categories:
         category_list = [c.strip() for c in categories.split(",")]
-        query = query.filter(Category.name.in_(category_list))
+        query = query.join(Memory.categories).filter(Category.name.in_(category_list))
 
     # Apply sorting if specified
     if sort_column:
@@ -159,10 +158,11 @@ async def list_memories(
             query = query.order_by(sort_field.desc()) if sort_direction == "desc" else query.order_by(sort_field.asc())
 
     # Add eager loading for app and categories
+    # Use subqueryload for categories to avoid DISTINCT ON issues with PostgreSQL
     query = query.options(
         joinedload(Memory.app),
-        joinedload(Memory.categories)
-    ).distinct(Memory.id)
+        subqueryload(Memory.categories)
+    )
 
     # Get paginated results with transformer
     return sqlalchemy_paginate(
@@ -575,8 +575,6 @@ async def filter_memories(
     # Apply category filter
     if request.category_ids:
         query = query.join(Memory.categories).filter(Category.id.in_(request.category_ids))
-    else:
-        query = query.outerjoin(Memory.categories)
 
     # Apply date filters
     if request.from_date:
@@ -611,10 +609,10 @@ async def filter_memories(
         # Default sorting
         query = query.order_by(Memory.created_at.desc())
 
-    # Add eager loading for categories and make the query distinct
+    # Add eager loading for categories via subquery to avoid DISTINCT ON issues with PostgreSQL
     query = query.options(
-        joinedload(Memory.categories)
-    ).distinct(Memory.id)
+        subqueryload(Memory.categories)
+    )
 
     # Use fastapi-pagination's paginate function
     return sqlalchemy_paginate(
@@ -658,21 +656,21 @@ async def get_related_memories(
         return Page.create([], total=0, params=params)
     
     # Build query for related memories
-    query = db.query(Memory).distinct(Memory.id).filter(
+    query = db.query(Memory).filter(
         Memory.user_id == user.id,
         Memory.id != memory_id,
         Memory.state != MemoryState.deleted
     ).join(Memory.categories).filter(
         Category.id.in_(category_ids)
     ).options(
-        joinedload(Memory.categories),
+        subqueryload(Memory.categories),
         joinedload(Memory.app)
     ).order_by(
         func.count(Category.id).desc(),
         Memory.created_at.desc()
     ).group_by(Memory.id)
     
-    # ⚡ Force page size to be 5
+    # Force page size to be 5
     params = Params(page=params.page, size=5)
     
     return sqlalchemy_paginate(
